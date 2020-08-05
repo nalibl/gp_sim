@@ -4,6 +4,7 @@ addpath('.\util')
 addpath('.\dxf_util')
 ShowPlots=true;
 dxf_out=false;
+noise_en=0.05;
 type = 'def';
 %% All units are in um
 % Constants
@@ -75,8 +76,9 @@ end
 fy=-0.5/dy:1/L_y:0.5/dy-1/L_y;
 %% Input Gaussian
 input_phase = exp(-0*1i*2*pi*lambda*0.4*real(sqrt((1/lambda^2-fy.^2))));
-Ex_0=y.^0; %input_phase.*exp(-(y/L_y).^2)/sqrt(2);
-pol_angle = tan(0);
+gaussian_width = 50;
+Ex_0=exp(-0.5*(y/(gaussian_width)).^2)/(gaussian_width * sqrt(2*pi)); %input_phase.*exp(-(y/L_y).^2)/sqrt(2);
+pol_angle = tan(pi/4);
 pol_phase = exp(1i*pi/2);
 Ey_0=Ex_0*pol_angle*pol_phase;
 [Ex,Ey]=rot_2d(Ex_0,Ey_0,theta_pos);% Postive domain is default
@@ -94,10 +96,17 @@ TF_neg_e=ifftshift(exp(-1i*2*pi*L_HW*n_e_neg*real(sqrt((1/lambda^2-fy.^2)))));
 % TF_neg_o=ifftshift(exp(-1i*pi*L_HW*n_o_neg*lambda*fy.^2));
 % TF_neg_e=ifftshift(exp(-1i*pi*L_HW*n_e_neg*lambda*fy.^2));
 
-prop_pos_o=@(In) ifft(TF_pos_o.*fft(In));
-prop_pos_e=@(In) ifft(TF_pos_e.*fft(In));
-prop_neg_o=@(In) ifft(TF_neg_o.*fft(In));
-prop_neg_e=@(In) ifft(TF_neg_e.*fft(In));
+if noise_en~=0
+    prop_pos_o=@(In, noise) ifft(fft(In).*TF_pos_o.^(noise));
+    prop_pos_e=@(In, noise) ifft(fft(In).*TF_pos_e.^(noise));
+    prop_neg_o=@(In, noise) ifft(fft(In).*TF_neg_o.^(noise));
+    prop_neg_e=@(In, noise) ifft(fft(In).*TF_neg_e.^(noise));
+else
+    prop_pos_o=@(In, noise) ifft(TF_pos_o.*fft(In));
+    prop_pos_e=@(In, noise) ifft(TF_pos_e.*fft(In));
+    prop_neg_o=@(In, noise) ifft(TF_neg_o.*fft(In));
+    prop_neg_e=@(In, noise) ifft(TF_neg_e.*fft(In));    
+end
 %% Whole domain propagation
 % Define first domain as positive
 % Define x axes as ordinary
@@ -105,26 +114,27 @@ err=zeros(size(crystal_mask,3),1);
 for pidx=1:size(crystal_mask,3)
     for cidx=1:(n_FW-1)
         poling_mask=crystal_mask(cidx,:,pidx);%mask along x axis
+        pertrub_domain_length = randn(2,1)*noise_en + 1;
         % Principle domain - first positive domain then negative
         % Positive domain propagation along principle axes
-        Ex_pos_n=prop_pos_o(Ex(cidx,:));
-        Ey_pos_n=prop_pos_e(Ey(cidx,:));
+        Ex_pos_n=prop_pos_o(Ex(cidx,:), pertrub_domain_length(1));
+        Ey_pos_n=prop_pos_e(Ey(cidx,:), pertrub_domain_length(1));
         % Negative domain
         [Ex_neg,Ey_neg]=rot_2d(Ex_pos_n,Ey_pos_n,theta_neg-theta_pos);% Angle rotates from positive to negative
         % Propagate through negative domain to positive domain
-        Ex_neg_n=prop_neg_o(Ex_neg);
-        Ey_neg_n=prop_neg_e(Ey_neg);    
+        Ex_neg_n=prop_neg_o(Ex_neg, pertrub_domain_length(2));
+        Ey_neg_n=prop_neg_e(Ey_neg, pertrub_domain_length(2));    
         [Ex(cidx+1,:),Ey(cidx+1,:)]=rot_2d(Ex_neg_n,Ey_neg_n,theta_pos-theta_neg);
         % Conjugated domain - first negative then positive
         [Ex_neg,Ey_neg]=rot_2d(Ex(cidx,:),Ey(cidx,:),theta_neg-theta_pos);
-        Ex_neg_n=prop_neg_o(Ex_neg);
-        Ey_neg_n=prop_neg_e(Ey_neg);
+        Ex_neg_n=prop_neg_o(Ex_neg, pertrub_domain_length(1));
+        Ey_neg_n=prop_neg_e(Ey_neg, pertrub_domain_length(1));
         [Ex_pos_n,Ey_pos_n]=rot_2d(Ex_neg_n,Ey_neg_n,theta_pos-theta_neg);
-        Ex_pos_nn=prop_pos_o(Ex_pos_n);
-        Ey_pos_nn=prop_pos_e(Ey_pos_n);
-        % Twice positive - gap domain between to gratings according to HCP
-        Ex_t_pos_nn=prop_pos_o(prop_pos_o(Ex(cidx,:)));
-        Ey_t_pos_nn=prop_pos_e(prop_pos_e(Ey(cidx,:)));
+        Ex_pos_nn=prop_pos_o(Ex_pos_n, pertrub_domain_length(2));
+        Ey_pos_nn=prop_pos_e(Ey_pos_n, pertrub_domain_length(2));
+        % Twice positive - gap domain between two gratings according to HCP
+        Ex_t_pos_nn=prop_pos_o(prop_pos_o(Ex(cidx,:), pertrub_domain_length(1)), pertrub_domain_length(2));
+        Ey_t_pos_nn=prop_pos_e(prop_pos_e(Ey(cidx,:), pertrub_domain_length(1)), pertrub_domain_length(2));
         % Seperate to different regions
         Ex(cidx+1,poling_mask==1)=Ex_pos_nn(poling_mask==1);
         Ey(cidx+1,poling_mask==1)=Ey_pos_nn(poling_mask==1);        
@@ -158,40 +168,34 @@ if ShowPlots
     figure;plot(y_new,angle_EL_o);title('LCP angle outside crystal');xlabel('y [\mum]');ylabel('Radians')
 end
 %% Propagate to focal plane
-EL_o=padarray(EL_o,[0,length(EL_o)]);
+EL_o=padarray(EL_o,[0,length(EL_o)*3]);
 dy_new=y_new(2)-y_new(1);
 L_new=length(EL_o)*dy_new;
+y_new = -L_new/2:dy_new:L_new/2-dy_new;
 fy_fs=-0.5/dy_new:1/L_new:0.5/dy_new-1/L_new;
 TF_fs=ifftshift(exp(-1i*2*pi*real(sqrt((1/lambda^2-fy_fs.^2)))));
 % TF_fs=ifftshift(exp(1i*pi*lambda*fy_fs.^2));
 prop_fs=@(In,z) ifft((TF_fs.^z).*fft(In));
-sqr_fac=polyfit(y_new,angle_EL_o,2);f_dist=pi/(lambda*sqr_fac(1));
-I_f=abs(prop_fs(EL_o,f_dist)).^2;
+% sqr_fac=polyfit(y_new,angle_EL_o,2);f_dist=pi/(lambda*sqr_fac(1));
+% I_f=abs(prop_fs(EL_o,f_dist)).^2;
 %% Propagate
 delta_z=300;% In microns
 prop_size=600; % Cycles to run outside crystal
-% EL_op=repmat(padarray(EL_o,[0,size(EL_o,2)]),[prop_size,1]);
-% Lens at exit
-% EL_op0=EL_o.*exp(-1i*40*linspace(-1,1,length(EL_o)).^2);
+ER_o=(Ex_o+1i*Ey_o)/sqrt(2);
+ER_o=padarray(ER_o,[0,length(ER_o)*3]);
+ER_op0 = ER_o;
+ER_op=repmat(ER_op0,[prop_size,1]);
 EL_op0=EL_o;
 EL_op=repmat(EL_op0,[prop_size,1]);
-% EL_op1=repmat([EL_op0(1:floor(end/2)),zeros(1,length(EL_op0(ceil(end/2):end)))],[prop_size,1]);
-% EL_op2=repmat([zeros(1,length(EL_op0(1:floor(end/2)))),EL_op0(ceil(end/2):end)],[prop_size,1]);
 for idx=1:prop_size-1
-%     EL_op(idx,:)=prop_fs(EL_op(1,:),delta_z*idx);
-%     EL_op1(idx,:)=prop_fs(EL_op1(1,:),delta_z*idx);
-%     EL_op2(idx,:)=prop_fs(EL_op2(1,:),delta_z*idx);
-%     EL_op(idx,round(end/2)-50:round(end/2)+50)=0;
     EL_op(idx+1,:)=prop_fs(EL_op(idx,:),delta_z);
-%     EL_op(idx+1,round(end/2)-30:round(end/2)+30)=0;
+    ER_op(idx+1,:)=prop_fs(ER_op(idx,:),delta_z);
 end
-% EL_op=[EL_op1(:,1:floor(end/2)),EL_op2(:,ceil(end/2):end)];
 if ShowPlots
     ashow(abs(EL_op).^2,y_new,prop_size*1e-3*(1:prop_size));title('LCP propagation outside crystal');xlabel('y [\mum]');ylabel('x [mm]')
-%     figure;plot(abs(EL_op(200,round(5373*0.2):round(5373*0.8))).^2);
+    ashow(abs(EL_op).^2 + abs(ER_op).^2,y_new,prop_size*1e-3*(1:prop_size));title('Total intensity propagation outside crystal');xlabel('y [\mum]');ylabel('x [mm]');
+    ashow(abs(ER_op).^2,y_new,prop_size*1e-3*(1:prop_size));title('RCP intensity propagation outside crystal');xlabel('y [\mum]');ylabel('x [mm]');
 end
-%     figure;plot(y,unwrap(angle(Ex(end,:))),y,unwrap(angle(Ey(end,:))));
-%     ashow(abs(Ex).^2);
 %% Output DXF file
 if dxf_out
     file_name = ['D:\NON-backup\PPLN_mask_' type '_s'];
